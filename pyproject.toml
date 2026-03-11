@@ -1,0 +1,21 @@
+[project]
+name = "worker-agent-negotiator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.135.1",
+    "livekit>=1.1.2",
+    "livekit-agents>=1.4.4",
+    "livekit-api>=1.1.0",
+    "livekit-plugins-elevenlabs>=1.4.4",
+    "livekit-plugins-google>=1.4.4",
+    "livekit-plugins-noise-cancellation>=0.2.5",
+    "livekit-plugins-openai>=1.4.4",
+    "livekit-plugins-silero>=1.4.4",
+    "livekit-plugins-turn-detector>=1.4.4",
+    "pydantic>=2.12.5",
+    "pydantic-core>=2.41.5",
+    "pydantic-settings>=2.13.1",
+]
