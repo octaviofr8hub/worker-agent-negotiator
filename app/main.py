@@ -1,7 +1,6 @@
 """
 Main Worker - LiveKit Agents SDK entrypoint.
 Escucha dispatches y maneja llamadas SIP salientes.
-NO usa livekit-cli, solo SDK.
 """
 from core.config import settings
 from agents.voice_agent import VoiceAgent
@@ -26,20 +25,18 @@ from livekit.agents import (
 )
 
 
-logger = logging.getLogger("outbound-dispatcher")
+logger = logging.getLogger("outbound-agent-negotiator")
 logger.setLevel(logging.INFO)
 
 
 async def entrypoint(ctx: JobContext):
     """Entrypoint del worker: recibe un job con metadata y hace la llamada."""
-    # Import config y voice_agent aquí (no disponibles durante download-files)
-
     logger.info(f"Conectando a room: {ctx.room.name}")
     await ctx.connect()
-    # Parsear metadata del dispatch
+
+    # Parsear metadata del dispatch (NegotiationPayload)
     dial_info = json.loads(ctx.job.metadata)
-    segment_id = dial_info.get("segment_id")
-    phone_number = dial_info.get("phone_number")
+    phone_number = dial_info.get("carrier_main_phone", "")
 
     # Validar teléfono
     if not phone_number or not isinstance(phone_number, str) or not phone_number.startswith("+"):
@@ -47,10 +44,11 @@ async def entrypoint(ctx: JobContext):
         ctx.shutdown()
         return
 
-    # Detectar idioma por prefijo
-    if phone_number.startswith("+1"):
-        language = "en"
-    elif phone_number.startswith("+52") or phone_number.startswith("+34"):
+    # Detectar idioma por país de origen/destino
+    pickup_country = dial_info.get("pickup_country", "").upper()
+    dropoff_country = dial_info.get("dropoff_country", "").upper()
+    spanish_countries = {"MX", "ES", "CO", "AR", "CL", "PE", "GT", "HN", "SV", "NI", "CR", "PA"}
+    if pickup_country in spanish_countries or dropoff_country in spanish_countries:
         language = "es"
     else:
         language = "en"
@@ -153,7 +151,7 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="outbound-dispatcher",
+            agent_name="outbound-agent-negotiator",
             api_key=settings.LIVEKIT_API_KEY,
             api_secret=settings.LIVEKIT_API_SECRET,
             ws_url=settings.LIVEKIT_URL,
