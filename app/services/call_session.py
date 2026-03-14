@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -30,6 +31,73 @@ from services.db_service import add_transcript_message, update_negotiation
 logger = logging.getLogger("call-session")
 
 AUDIO_CHUNK_SIZE = 160
+
+
+# ═════════════════════════════════════════════════════════════
+#  HELPERS TTS — normalización de texto para pronunciación
+# ═════════════════════════════════════════════════════════════
+
+def _num_es(n: int) -> str:
+    """Convierte entero (0–999 999) a palabras en español."""
+    if n == 0:
+        return "cero"
+    _units = ["", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve",
+              "diez", "once", "doce", "trece", "catorce", "quince", "dieciséis", "diecisiete",
+              "dieciocho", "diecinueve"]
+    _tens = ["", "", "veinte", "treinta", "cuarenta", "cincuenta",
+             "sesenta", "setenta", "ochenta", "noventa"]
+    _hunds = ["", "cien", "doscientos", "trescientos", "cuatrocientos", "quinientos",
+              "seiscientos", "setecientos", "ochocientos", "novecientos"]
+    parts = []
+    if n >= 1000:
+        t = n // 1000
+        n %= 1000
+        parts.append("mil" if t == 1 else f"{_num_es(t)} mil")
+    if n >= 100:
+        h, n = divmod(n, 100)
+        if h == 1 and n == 0:
+            parts.append("cien")
+        elif h == 1:
+            parts.append("ciento")
+        else:
+            parts.append(_hunds[h])
+    if n > 0:
+        if n < 20:
+            parts.append(_units[n])
+        elif n % 10 == 0:
+            parts.append(_tens[n // 10])
+        else:
+            t, u = divmod(n, 10)
+            parts.append(f"veinti{_units[u]}" if t == 2 else f"{_tens[t]} y {_units[u]}")
+    return " ".join(parts)
+
+
+def _normalize_for_tts(text: str, language: str) -> str:
+    """Convierte cifras y monedas a palabras para que ElevenLabs las pronuncie bien."""
+    if language != "es":
+        return text
+
+    def _usd(m: re.Match) -> str:
+        raw = m.group(1).replace(",", "")
+        parts = raw.split(".")
+        integer = int(parts[0])
+        cents = int(parts[1].ljust(2, "0")[:2]) if len(parts) > 1 and parts[1] else 0
+        result = f"{_num_es(integer)} dólares"
+        if cents:
+            result += f" con {_num_es(cents)} centavos"
+        return result
+
+    # $4427.38  o  $4,427.38
+    text = re.sub(r'\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)', _usd, text)
+    # $4427  sin decimales
+    text = re.sub(r'\$([0-9]+)', _usd, text)
+
+    def _big_num(m: re.Match) -> str:
+        return _num_es(int(m.group(0).replace(",", "")))
+
+    # Números >= 1000 que no fueron capturados (ej: 1445 millas)
+    text = re.sub(r'\b[0-9]{4,}(?:,[0-9]{3})*\b', _big_num, text)
+    return text
 
 
 class CallSession:
@@ -144,8 +212,9 @@ class CallSession:
             encoding=speech.RecognitionConfig.AudioEncoding.MULAW,
             sample_rate_hertz=8000,
             language_code=lang_code,
-            model="latest_long",
+            model="telephony",
             enable_automatic_punctuation=True,
+            use_enhanced=True,
         )
         streaming_config = speech.StreamingRecognitionConfig(
             config=config,
@@ -207,6 +276,8 @@ class CallSession:
             return
         start_time = time.time()
         async with self._processing_lock:
+            if self._ended:  # re-check tras adquirir el lock
+                return
             await self._process_user_speech(transcript)
         elapsed = time.time() - start_time
         logger.info(f"[TIMING] Process speech took {elapsed:.2f}s")
@@ -220,70 +291,147 @@ class CallSession:
         await add_transcript_message(self.call_id, "user", transcript)
         await self._run_llm_loop()
 
+    def _sanitize_messages(self):
+        """Elimina assistant tool_call messages sin tool responses correspondientes."""
+        clean = []
+        i = 0
+        while i < len(self.messages):
+            msg = self.messages[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                tc_ids = {tc["id"] for tc in msg["tool_calls"]}
+                j = i + 1
+                found_ids = set()
+                while j < len(self.messages) and self.messages[j].get("role") == "tool":
+                    found_ids.add(self.messages[j].get("tool_call_id", ""))
+                    j += 1
+                if not tc_ids.issubset(found_ids):
+                    logger.warning(f"[LLM] Sanitizando tool_calls huérfanos: {tc_ids - found_ids}")
+                    i = j  # saltar el bloque incompleto
+                    continue
+            clean.append(msg)
+            i += 1
+        self.messages = clean
+
     async def _run_llm_loop(self):
         while True:
             if self._ended:
                 return
 
+            self._sanitize_messages()
+
             try:
                 llm_start = time.time()
                 client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-                response = await client.chat.completions.create(
-                    model="gpt-4o",
+                stream = await client.chat.completions.create(
+                    model="gpt-4o-mini",
                     messages=self.messages,
                     tools=TOOLS_SCHEMA,
                     temperature=0.3,
                     top_p=0.8,
-                    max_completion_tokens=150,
+                    max_completion_tokens=120,
                     timeout=10.0,
+                    stream=True,
                 )
-                llm_elapsed = time.time() - llm_start
-                logger.info(f"[TIMING] LLM took {llm_elapsed:.2f}s")
             except Exception as e:
                 logger.error(f"[LLM] Error: {e}")
                 return
 
-            choice = response.choices[0]
-            msg = choice.message
+            full_content = ""
+            pending_text = ""
+            tool_calls_acc: dict[int, dict] = {}
+            sentence_queue: asyncio.Queue = asyncio.Queue()
 
-            if msg.tool_calls:
-                self.messages.append(
+            # TTS consumer: reproduce oraciones conforme llegan
+            tts_task = asyncio.create_task(
+                self._tts_sentence_player(sentence_queue)
+            )
+
+            async for chunk in stream:
+                if self._ended:
+                    break
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                # Acumular tool call deltas
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc.id:
+                            tool_calls_acc[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_acc[idx]["name"] += tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+                # Acumular contenido y emitir oraciones completas al TTS
+                if delta.content:
+                    full_content += delta.content
+                    pending_text += delta.content
+
+                    while True:
+                        m = re.search(r'[.!?]+(?:\s+|$)', pending_text)
+                        if not m:
+                            break
+                        sentence = pending_text[:m.end()].strip()
+                        pending_text = pending_text[m.end():]
+                        if sentence:
+                            await sentence_queue.put(sentence)
+
+            llm_elapsed = time.time() - llm_start
+            logger.info(f"[TIMING] LLM stream took {llm_elapsed:.2f}s")
+
+            # Vaciar texto restante (sin puntuación final)
+            if pending_text.strip() and not tool_calls_acc:
+                await sentence_queue.put(pending_text.strip())
+
+            # Señal de fin al TTS consumer
+            await sentence_queue.put(None)
+
+            if tool_calls_acc:
+                await tts_task
+
+                tool_calls_list = [
                     {
-                        "role": "assistant",
-                        "content": msg.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ],
+                        "id": tc_data["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc_data["name"],
+                            "arguments": tc_data["arguments"],
+                        },
                     }
-                )
+                    for tc_data in tool_calls_acc.values()
+                ]
+                self.messages.append({
+                    "role": "assistant",
+                    "content": full_content or "",
+                    "tool_calls": tool_calls_list,
+                })
 
                 end_after = False
-                for tc in msg.tool_calls:
+                for tc_data in tool_calls_acc.values():
                     try:
-                        args = json.loads(tc.function.arguments)
+                        args = json.loads(tc_data["arguments"])
                     except json.JSONDecodeError:
                         args = {}
 
-                    result_text, should_end = await self.agent.execute_tool(
-                        tc.function.name, args
-                    )
+                    try:
+                        result_text, should_end = await self.agent.execute_tool(
+                            tc_data["name"], args
+                        )
+                    except Exception as e:
+                        logger.error(f"[LLM] execute_tool '{tc_data['name']}' error: {e}")
+                        result_text = f"error: {e}"
+                        should_end = False
 
-                    self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result_text,
-                        }
-                    )
-
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_data["id"],
+                        "content": result_text,
+                    })
                     if should_end:
                         end_after = True
 
@@ -291,12 +439,24 @@ class CallSession:
                     return
                 continue
 
-            if msg.content:
-                self.messages.append({"role": "assistant", "content": msg.content})
-                await add_transcript_message(self.call_id, "assistant", msg.content)
-                await self.say(msg.content)
+            # Esperar a que termine el audio antes de regresar
+            await tts_task
+
+            if full_content:
+                self.messages.append({"role": "assistant", "content": full_content})
+                await add_transcript_message(self.call_id, "assistant", full_content)
 
             return
+
+    async def _tts_sentence_player(self, queue: asyncio.Queue):
+        """Consume oraciones del queue y las reproduce secuencialmente via TTS."""
+        while True:
+            sentence = await queue.get()
+            if sentence is None:
+                break
+            if self._ended:
+                continue  # drenar el queue sin reproducir
+            await self.say(sentence, allow_interruptions=True)
 
     # ═════════════════════════════════════════════════════════
     #  TTS (ElevenLabs streaming → mulaw 8 kHz)
@@ -306,6 +466,7 @@ class CallSession:
         if self._ended or not text.strip():
             return
 
+        text = _normalize_for_tts(text, self.language)
         tts_start = time.time()
         self._is_playing = True
         self._interrupted = False
@@ -348,6 +509,17 @@ class CallSession:
 
             if buffer and not (self._interrupted and allow_interruptions):
                 await self._send_audio_chunk(buffer)
+
+            # Solo esperar confirmación de playback en mensajes de despedida (before hangup).
+            # En conversación normal no esperamos el mark: Twilio bufferiza el audio en orden
+            # y next sentence empieza TTS inmediatamente sin bloquear.
+            if not allow_interruptions and not self._interrupted:
+                self._playback_done.clear()
+                await self._send_mark("tts_done")
+                try:
+                    await asyncio.wait_for(self._playback_done.wait(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning("[TTS] Timeout esperando confirmación de playback farewell")
 
         except Exception as e:
             logger.error(f"[TTS] Error: {e}")

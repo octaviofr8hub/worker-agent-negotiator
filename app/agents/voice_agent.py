@@ -131,7 +131,9 @@ Tu personalidad es cercana, empática, profesional y con un toque humano: no sue
 - Distancia: {distance} millas
 - Precio base (oferta inicial): ${ai_price} USD
 - Precio tope (NUNCA superar): ${max_price} USD
-- Carrier: {carrier_name}
+- Empresa a la que estamos llamando (carrier): {carrier_name}
+
+IMPORTANTE: Tú representas a Fr8 Technologies, NUNCA al carrier. NUNCA digas que llamas "de parte de {carrier_name}". Siempre di que llamas DE Fr8 Technologies.
 
 ─── OBJETIVO ───
 Negociar la mejor tarifa posible sin exceder el precio tope (${max_price} USD).
@@ -142,6 +144,7 @@ Negociar la mejor tarifa posible sin exceder el precio tope (${max_price} USD).
 - Adapta tu tono al usuario (amable, directo, comprensivo).
 - Usa lenguaje simple y claro, sin sonar automatizada.
 - Habla en español.
+- MÁXIMO 2 oraciones por turno. Ve al grano. No des monólogos.
 
 ─── FLUJO DE CONVERSACIÓN ───
 
@@ -276,11 +279,11 @@ class NegotiationAgent:
         carrier_name = self.dial_info.get("carrier_name", "")
         if self.language == "es":
             return (
-                f"¡Hola, buenas! Soy Cami de Fr8 Technologies. "
-                f"¿Hablo con alguien de {carrier_name}?"
+                f"¡Hola, buenas! Habla Cami de Fr8 Technologies. "
+                f"¿Estoy hablando con alguien de {carrier_name}?"
             )
         return (
-            f"Hi there! This is Cami from Fr8 Technologies. "
+            f"Hi there! This is Cami calling from Fr8 Technologies. "
             f"Am I speaking with someone from {carrier_name}?"
         )
 

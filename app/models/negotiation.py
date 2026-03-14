@@ -23,10 +23,10 @@ class Negotiation(Base):
     # Route
     pickup_city = Column(String(100))
     pickup_state = Column(String(50))
-    pickup_country = Column(String(10))
+    pickup_country = Column(String(100))
     dropoff_city = Column(String(100))
     dropoff_state = Column(String(50))
-    dropoff_country = Column(String(10))
+    dropoff_country = Column(String(100))
     trailer_type = Column(String(50))
     distance = Column(String(20))
     load_date = Column(String(30))

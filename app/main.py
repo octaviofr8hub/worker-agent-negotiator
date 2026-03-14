@@ -200,56 +200,57 @@ async def get_negotiation_transcript(call_id: str):
     return {"call_id": call_id, "status": nego["status"], "messages": messages}
 
 
-@app.get("/negotiations/{call_id}/stream")
-async def stream_transcript(call_id: str):
-    """
-    SSE (Server-Sent Events) — Transmite transcript en tiempo real.
-    El frontend se conecta aquí y recibe cada mensaje conforme llega.
-    """
-    nego = await get_negotiation(call_id)
-    if not nego:
-        return JSONResponse({"error": "Negotiation not found"}, status_code=404)
-
-    async def event_generator():
-        # Primero enviar mensajes existentes
-        existing = await get_transcript(call_id)
-        for msg in existing:
-            import json
-            yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
-
-        # Si ya terminó, no suscribirse
-        nego_now = await get_negotiation(call_id)
-        if nego_now and nego_now["status"] in ("accepted", "rejected", "unavailable", "ended", "error"):
-            yield f"data: {json.dumps({'type': 'end', 'status': nego_now['status']}, ensure_ascii=False)}\n\n"
-            return
-
-        # Suscribirse al bus para nuevos mensajes
-        q = transcript_bus.subscribe(call_id)
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=30.0)
-                    if event is None:  # Señal de fin
-                        nego_final = await get_negotiation(call_id)
-                        final_status = nego_final["status"] if nego_final else "ended"
-                        yield f"data: {json.dumps({'type': 'end', 'status': final_status}, ensure_ascii=False)}\n\n"
-                        return
-                    import json
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                except asyncio.TimeoutError:
-                    yield f": keepalive\n\n"
-        finally:
-            transcript_bus.unsubscribe(call_id, q)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+# @app.get("/negotiations/{call_id}/stream")
+# async def stream_transcript(call_id: str):
+#     """
+#     SSE (Server-Sent Events) — Transmite transcript en tiempo real.
+#     DESHABILITADO: La visualización en tiempo real se maneja desde una API externa
+#     que consume directamente la BD, para no cargar este componente.
+#     """
+#     nego = await get_negotiation(call_id)
+#     if not nego:
+#         return JSONResponse({"error": "Negotiation not found"}, status_code=404)
+#
+#     async def event_generator():
+#         # Primero enviar mensajes existentes
+#         existing = await get_transcript(call_id)
+#         for msg in existing:
+#             import json
+#             yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+#
+#         # Si ya terminó, no suscribirse
+#         nego_now = await get_negotiation(call_id)
+#         if nego_now and nego_now["status"] in ("accepted", "rejected", "unavailable", "ended", "error"):
+#             yield f"data: {json.dumps({'type': 'end', 'status': nego_now['status']}, ensure_ascii=False)}\n\n"
+#             return
+#
+#         # Suscribirse al bus para nuevos mensajes
+#         q = transcript_bus.subscribe(call_id)
+#         try:
+#             while True:
+#                 try:
+#                     event = await asyncio.wait_for(q.get(), timeout=30.0)
+#                     if event is None:  # Señal de fin
+#                         nego_final = await get_negotiation(call_id)
+#                         final_status = nego_final["status"] if nego_final else "ended"
+#                         yield f"data: {json.dumps({'type': 'end', 'status': final_status}, ensure_ascii=False)}\n\n"
+#                         return
+#                     import json
+#                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+#                 except asyncio.TimeoutError:
+#                     yield f": keepalive\n\n"
+#         finally:
+#             transcript_bus.unsubscribe(call_id, q)
+#
+#     return StreamingResponse(
+#         event_generator(),
+#         media_type="text/event-stream",
+#         headers={
+#             "Cache-Control": "no-cache",
+#             "Connection": "keep-alive",
+#             "X-Accel-Buffering": "no",
+#         },
+#     )
 
 
 # ═════════════════════════════════════════════════════════════
